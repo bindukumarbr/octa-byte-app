@@ -310,10 +310,14 @@ resource "aws_ecr_repository" "backend" {
 
 # GitHub Actions OIDC Provider & IAM Role
 
+data "tls_certificate" "github" {
+  url = "https://token.actions.githubusercontent.com"
+}
+
 resource "aws_iam_openid_connect_provider" "github" {
   url             = "https://token.actions.githubusercontent.com"
   client_id_list  = ["sts.amazonaws.com"]
-  thumbprint_list = ["1c58a3a8518e8759bf075b76b750d4f2df264fcd", "6938fd4d98bab03faadb97b34396831e3780aea1", "1b511abead59c6ce207077c0bf0e0043b1382612"]
+  thumbprint_list = [data.tls_certificate.github.certificates[0].sha1_fingerprint]
 }
 
 data "aws_iam_policy_document" "github_actions_assume_role" {
@@ -408,6 +412,8 @@ resource "aws_iam_role_policy" "github_actions" {
   role   = aws_iam_role.github_actions.id
   policy = data.aws_iam_policy_document.github_actions_permissions.json
 }
+
+
 
 
 
