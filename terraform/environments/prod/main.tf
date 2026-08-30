@@ -267,7 +267,7 @@ module "ecs" {
           ]
           secrets = [
             {
-              name      = "DB_PASS"
+              name      = "DB_PASSWORD"
               valueFrom = "${module.db.db_instance_master_user_secret_arn}:password::"
             }
           ]
@@ -413,6 +413,7 @@ resource "aws_iam_role_policy" "github_actions" {
   role   = aws_iam_role.github_actions.id
   policy = data.aws_iam_policy_document.github_actions_permissions.json
 }
+
 
 
 
