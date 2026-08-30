@@ -1,3 +1,6 @@
+data "aws_region" "current" {}
+data "aws_caller_identity" "current" {}
+
 data "aws_availability_zones" "available" { state = "available" }
 
 locals {
@@ -371,8 +374,32 @@ data "aws_iam_policy_document" "github_actions_permissions" {
       "ecs:UpdateService",
       "ecs:DescribeServices"
     ]
-    # Restrict to the specific services created by the module
+    resources = [
+      "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${module.ecs.cluster_name}/frontend",
+      "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${module.ecs.cluster_name}/backend"
+    ]
+  }
+
+  statement {
+    sid    = "ECSTaskDef"
+    effect = "Allow"
+    actions = [
+      "ecs:DescribeTaskDefinition",
+      "ecs:RegisterTaskDefinition"
+    ]
     resources = ["*"]
+  }
+
+  statement {
+    sid    = "IAMPassRole"
+    effect = "Allow"
+    actions = ["iam:PassRole"]
+    resources = [
+      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/frontend-tasks-*",
+      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/frontend-task-exec-*",
+      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/backend-tasks-*",
+      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/backend-task-exec-*"
+    ]
   }
 }
 
@@ -381,4 +408,6 @@ resource "aws_iam_role_policy" "github_actions" {
   role   = aws_iam_role.github_actions.id
   policy = data.aws_iam_policy_document.github_actions_permissions.json
 }
+
+
 
