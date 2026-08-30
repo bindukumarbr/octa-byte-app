@@ -116,7 +116,7 @@ module "alb" {
   create_security_group = false
   security_groups       = [module.alb_sg.id]
 
-    listeners = {
+  listeners = {
     http = {
       port     = 80
       protocol = "HTTP"
@@ -144,9 +144,9 @@ module "alb" {
   target_groups = {
     frontend = {
       create_attachment = false
-      backend_protocol = "HTTP"
-      backend_port     = 80
-      target_type      = "ip"
+      backend_protocol  = "HTTP"
+      backend_port      = 80
+      target_type       = "ip"
       health_check = {
         enabled = true
         path    = "/"
@@ -154,9 +154,9 @@ module "alb" {
     }
     backend = {
       create_attachment = false
-      backend_protocol = "HTTP"
-      backend_port     = 4000
-      target_type      = "ip"
+      backend_protocol  = "HTTP"
+      backend_port      = 4000
+      target_type       = "ip"
       health_check = {
         enabled = true
         path    = "/health"
@@ -304,3 +304,80 @@ resource "aws_ecr_repository" "backend" {
 
 
 
+
+# GitHub Actions OIDC Provider & IAM Role
+
+resource "aws_iam_openid_connect_provider" "github" {
+  url             = "https://token.actions.githubusercontent.com"
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = ["1c58a3a8518e8759bf075b76b750d4f2df264fcd", "6938fd4d98bab03faadb97b34396831e3780aea1"]
+}
+
+data "aws_iam_policy_document" "github_actions_assume_role" {
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.github.arn]
+    }
+    condition {
+      test     = "StringLike"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = ["repo:bindukumarbr/octa-byte-app:*"] # Allow the specific repository
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "github_actions" {
+  name               = "github-actions-role"
+  assume_role_policy = data.aws_iam_policy_document.github_actions_assume_role.json
+}
+
+data "aws_iam_policy_document" "github_actions_permissions" {
+  statement {
+    sid       = "ECRLogin"
+    effect    = "Allow"
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "ECRPush"
+    effect = "Allow"
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:BatchGetImage",
+      "ecr:PutImage",
+      "ecr:InitiateLayerUpload",
+      "ecr:UploadLayerPart",
+      "ecr:CompleteLayerUpload"
+    ]
+    resources = [
+      aws_ecr_repository.frontend.arn,
+      aws_ecr_repository.backend.arn
+    ]
+  }
+
+  statement {
+    sid    = "ECSDeploy"
+    effect = "Allow"
+    actions = [
+      "ecs:UpdateService",
+      "ecs:DescribeServices"
+    ]
+    # Restrict to the specific services created by the module
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "github_actions" {
+  name   = "github-actions-deploy-policy"
+  role   = aws_iam_role.github_actions.id
+  policy = data.aws_iam_policy_document.github_actions_permissions.json
+}
