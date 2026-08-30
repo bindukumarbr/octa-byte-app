@@ -56,18 +56,18 @@ app.delete('/api/transaction', async (req, res, next) => {
   }
 });
 
-app.delete('/api/transaction/id', validateIdParam, async (req, res, next) => {
+app.delete('/api/transaction/:id', validateIdParam, async (req, res, next) => {
   try {
-    await transactionService.deleteTransactionById(req.body.id);
-    res.status(200).json({ message: `transaction with id ${req.body.id} deleted` });
+    await transactionService.deleteTransactionById(req.params.id);
+    res.status(200).json({ message: `transaction with id ${req.params.id} deleted` });
   } catch (err) {
     next(err);
   }
 });
 
-app.get('/api/transaction/id', validateIdParam, async (req, res, next) => {
+app.get('/api/transaction/:id', validateIdParam, async (req, res, next) => {
   try {
-    const transaction = await transactionService.findTransactionById(req.body.id);
+    const transaction = await transactionService.findTransactionById(req.params.id);
     if (!transaction) {
       return res.status(404).json({ message: 'transaction not found' });
     }
@@ -104,5 +104,6 @@ function shutdown(signal) {
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+
 
 

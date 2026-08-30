@@ -16,7 +16,7 @@ function validateTransactionBody(req, res, next) {
 }
 
 function validateIdParam(req, res, next) {
-  const { id } = req.body;
+  const { id } = req.params;
   if (id === undefined || id === null || isNaN(Number(id))) {
     return res.status(400).json({ message: 'id must be a number' });
   }
@@ -24,3 +24,4 @@ function validateIdParam(req, res, next) {
 }
 
 module.exports = { validateTransactionBody, validateIdParam };
+
