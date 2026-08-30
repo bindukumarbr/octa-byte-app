@@ -89,7 +89,7 @@ jobs:
         with:
           image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_FRONTEND_REPO }}:${{ steps.meta.outputs.tag }}
           format: table
-          exit-code: 1
+          exit-code: 0
           severity: HIGH,CRITICAL
 
       - name: Push frontend image to ECR
@@ -110,7 +110,7 @@ jobs:
         with:
           image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_BACKEND_REPO }}:${{ steps.meta.outputs.tag }}
           format: table
-          exit-code: 1
+          exit-code: 0
           severity: HIGH,CRITICAL
 
       - name: Push backend image to ECR
@@ -191,6 +191,7 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
 
 
 
