@@ -101,7 +101,7 @@ The entire infrastructure is coded using Terraform, which ensures that the envir
 - **Modular Design:** The Terraform codebase is separated into reusable logical modules (vpc, ecs,
   This DRY (Don't Repeat Yourself) method enables identical infrastructure topographies to be set up for staging or for production by just inserting different .tfvars files.
   – Remote State Management: The Terraform state file (terraform.tfstate) is kept in an encrypted Amazon S3 bucket with versioning turned on in order to avoid data loss.
-- **State Locking:** State locking is implemented by an Amazon DynamoDB table. This ensures that simultaneous writes do not cause corruption of the infrastructure state when multiple CI/CD pipeline executions take place.
+- **State Locking:** State locking is implemented natively via the S3 backend using the modern `use_lockfile = true` feature. This eliminates the legacy requirement for a separate DynamoDB table, reducing infrastructure complexity while still guaranteeing that simultaneous writes do not corrupt the infrastructure state during CI/CD pipeline executions.
 
 ---
 
