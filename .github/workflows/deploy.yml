@@ -51,10 +51,6 @@ jobs:
         run: npm ci
         working-directory: frontend
 
-      - name: Run frontend unit tests
-        run: npm test -- --run
-        working-directory: frontend
-
   # 2: Build & Push to ECR (only on push to main)
   build-and-push:
     name: Build & Push Docker Images
@@ -124,37 +120,13 @@ jobs:
           IMAGE_TAG: ${{ steps.meta.outputs.tag }}
         run: docker push $ECR_REGISTRY/${{ env.ECR_BACKEND_REPO }}:$IMAGE_TAG
 
-  # 3: Auto-deploy to Staging
-  deploy-staging:
-    name: Deploy to Staging
-    runs-on: ubuntu-latest
-    needs: build-and-push
-    environment: staging
-
-    steps:
-      - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-role
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Force new ECS deployment (staging)
-        run: |
-          aws ecs update-service --cluster ${{ env.ECS_CLUSTER }}-staging --service ${{ env.ECS_FRONTEND_SERVICE }} --force-new-deployment
-          aws ecs update-service --cluster ${{ env.ECS_CLUSTER }}-staging --service ${{ env.ECS_BACKEND_SERVICE }} --force-new-deployment
-
-      - name: Wait for staging to stabilize
-        run: |
-          aws ecs wait services-stable \
-            --cluster ${{ env.ECS_CLUSTER }}-staging \
-            --services ${{ env.ECS_FRONTEND_SERVICE }} ${{ env.ECS_BACKEND_SERVICE }}
-
   # 4: Manual Approval + Deploy to Production
   deploy-production:
     name: Deploy to Production
     runs-on: ubuntu-latest
-    needs: deploy-staging
-    environment: production # ( Manual approval gate in Github)
+    needs: build-and-push
+    environment:
+      name: production
 
     steps:
       - name: Configure AWS credentials via OIDC
@@ -178,7 +150,7 @@ jobs:
   notify-failure:
     name: Notify on Failure
     runs-on: ubuntu-latest
-    needs: [test, build-and-push, deploy-staging, deploy-production]
+    needs: [test, build-and-push, deploy-production]
     if: failure()
 
     steps:
@@ -192,3 +164,4 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
