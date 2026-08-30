@@ -218,7 +218,7 @@ module "ecs" {
       container_definitions = {
         frontend = {
           essential                = true
-          readonly_root_filesystem = false
+          readonlyRootFilesystem = false
           image                    = "nginx:alpine"
           portMappings = [
             {
@@ -251,7 +251,7 @@ module "ecs" {
       container_definitions = {
         backend = {
           essential                = true
-          readonly_root_filesystem = false
+          readonlyRootFilesystem = false
           image                    = "node:18-alpine" # Placeholder until CI/CD
           portMappings = [
             {
@@ -415,6 +415,7 @@ resource "aws_iam_role_policy" "github_actions" {
   role   = aws_iam_role.github_actions.id
   policy = data.aws_iam_policy_document.github_actions_permissions.json
 }
+
 
 
 
