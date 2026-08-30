@@ -246,6 +246,7 @@ module "ecs" {
       security_group_ids    = [module.ecs_sg.id]
       subnet_ids            = module.vpc.private_subnets
 
+      task_exec_secret_arns = ["${module.db.db_instance_master_user_secret_arn}*"]
       container_definitions = {
         backend = {
           essential = true
@@ -395,8 +396,8 @@ data "aws_iam_policy_document" "github_actions_permissions" {
   }
 
   statement {
-    sid    = "IAMPassRole"
-    effect = "Allow"
+    sid     = "IAMPassRole"
+    effect  = "Allow"
     actions = ["iam:PassRole"]
     resources = [
       "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/frontend-tasks-*",
@@ -412,6 +413,8 @@ resource "aws_iam_role_policy" "github_actions" {
   role   = aws_iam_role.github_actions.id
   policy = data.aws_iam_policy_document.github_actions_permissions.json
 }
+
+
 
 
 
