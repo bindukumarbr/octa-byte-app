@@ -29,7 +29,7 @@ app.get('/health', (req, res) => {
   res.json('This is the health check');
 });
 
-app.post('/transaction', validateTransactionBody, async (req, res, next) => {
+app.post('/api/transaction', validateTransactionBody, async (req, res, next) => {
   try {
     const transaction = await transactionService.addTransaction(req.body.amount, req.body.desc);
     res.status(201).json({ message: 'added transaction successfully', transaction });
@@ -38,7 +38,7 @@ app.post('/transaction', validateTransactionBody, async (req, res, next) => {
   }
 });
 
-app.get('/transaction', async (req, res, next) => {
+app.get('/api/transaction', async (req, res, next) => {
   try {
     const result = await transactionService.getAllTransactions();
     res.status(200).json({ result });
@@ -47,7 +47,7 @@ app.get('/transaction', async (req, res, next) => {
   }
 });
 
-app.delete('/transaction', async (req, res, next) => {
+app.delete('/api/transaction', async (req, res, next) => {
   try {
     await transactionService.deleteAllTransactions();
     res.status(200).json({ message: 'delete function execution finished.' });
@@ -56,7 +56,7 @@ app.delete('/transaction', async (req, res, next) => {
   }
 });
 
-app.delete('/transaction/id', validateIdParam, async (req, res, next) => {
+app.delete('/api/transaction/id', validateIdParam, async (req, res, next) => {
   try {
     await transactionService.deleteTransactionById(req.body.id);
     res.status(200).json({ message: `transaction with id ${req.body.id} deleted` });
@@ -65,7 +65,7 @@ app.delete('/transaction/id', validateIdParam, async (req, res, next) => {
   }
 });
 
-app.get('/transaction/id', validateIdParam, async (req, res, next) => {
+app.get('/api/transaction/id', validateIdParam, async (req, res, next) => {
   try {
     const transaction = await transactionService.findTransactionById(req.body.id);
     if (!transaction) {
@@ -94,3 +94,4 @@ function shutdown(signal) {
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+

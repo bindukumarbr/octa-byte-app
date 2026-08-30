@@ -39,7 +39,7 @@ describe("GET /transaction", () => {
     transactionService.getAllTransactions.mockResolvedValue([
       { id: 1, amount: 100, desc: "test" },
     ]);
-    const res = await request(app).get("/transaction");
+    const res = await request(app).get("/api/transaction");
     expect(res.statusCode).toBe(200);
     expect(res.body.result).toHaveLength(1);
   });
@@ -54,19 +54,19 @@ describe("POST /transaction", () => {
       desc: "lunch",
     });
     const res = await request(app)
-      .post("/transaction")
+      .post("/api/transaction")
       .send({ amount: 50, desc: "lunch" });
     expect(res.statusCode).toBe(201);
     expect(res.body.message).toBe("added transaction successfully");
   });
 
   it("should return 400 when amount is missing", async () => {
-    const res = await request(app).post("/transaction").send({ desc: "lunch" });
+    const res = await request(app).post("/api/transaction").send({ desc: "lunch" });
     expect(res.statusCode).toBe(400);
   });
 
   it("should return 400 when desc is missing", async () => {
-    const res = await request(app).post("/transaction").send({ amount: 50 });
+    const res = await request(app).post("/api/transaction").send({ amount: 50 });
     expect(res.statusCode).toBe(400);
   });
 });
@@ -75,8 +75,9 @@ describe("POST /transaction", () => {
 describe("DELETE /transaction", () => {
   it("should return 200 when all transactions deleted", async () => {
     transactionService.deleteAllTransactions.mockResolvedValue();
-    const res = await request(app).delete("/transaction");
+    const res = await request(app).delete("/api/transaction");
     expect(res.statusCode).toBe(200);
     expect(res.body.message).toBe("delete function execution finished.");
   });
 });
+
