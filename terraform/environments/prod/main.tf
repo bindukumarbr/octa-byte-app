@@ -330,7 +330,7 @@ data "aws_iam_policy_document" "github_actions_assume_role" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:bindukumarbr/octa-byte-app:*"] # Allow the specific repository
+      values   = ["repo:bindukumarbr@121097989/octa-byte-app@1351143352:*"] # Allow the specific repository
     }
     condition {
       test     = "StringEquals"
@@ -412,6 +412,7 @@ resource "aws_iam_role_policy" "github_actions" {
   role   = aws_iam_role.github_actions.id
   policy = data.aws_iam_policy_document.github_actions_permissions.json
 }
+
 
 
 
