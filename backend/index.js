@@ -79,8 +79,18 @@ app.get('/api/transaction/id', validateIdParam, async (req, res, next) => {
 
 app.use(errorHandler);
 
+const fs = require('fs');
+const path = require('path');
+
 const server = // start server
-app.listen(port, () => {
+app.listen(port, async () => {
+  try {
+    const schemaSql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
+    await pool.query(schemaSql);
+    console.log('Database schema initialized');
+  } catch (err) {
+    console.error('Failed to initialize database schema:', err);
+  }
   console.log(`Backend listening on port ${port}`);
 });
 
@@ -94,4 +104,5 @@ function shutdown(signal) {
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+
 
