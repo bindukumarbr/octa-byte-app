@@ -8,3 +8,6 @@ build/
 *.tfstate.backup
 .DS_Store
 coverage/
+
+# Private prep notes with account-specific details; the repo is public
+docs/terraform_access_guide.md
