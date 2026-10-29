@@ -1,109 +1,93 @@
+// ============================================================
+// INTERVIEW NOTE: validateEnv() runs FIRST — before any require()
+// that might need env vars. It checks that all required environment
+// variables (DB_HOST, DB_USER, DB_PASSWORD, etc.) are present.
+// If any are missing, it calls process.exit(1) immediately.
+// WHY fail-fast here: starting the server without a DB host configured
+// would mean every request fails with an opaque connection error.
+// Better to crash loudly with a clear message at startup.
+// ============================================================
 const { validateEnv } = require('./env');
 validateEnv();
 
-const transactionService = require('./TransactionService');
+const fs   = require('fs');
+const path = require('path');
 const pool = require('./db');
-const express = require('express');
-const bodyParser = require('body-parser');
-const cors = require('cors');
-const { validateTransactionBody, validateIdParam } = require('./middleware/validation');
-const { errorHandler } = require('./middleware/errorHandler');
+const app  = require('./app'); // Express app + all routes live in app.js — see that file
 
-// setup express
-const app = express();
 const port = process.env.PORT || 4000;
 
-app.use(bodyParser.urlencoded({ extended: true }));
-app.use(bodyParser.json());
-app.use(cors());
-
-app.use((req, res, next) => {
-  const start = Date.now();
-  res.on('finish', () => {
-    console.log(`${req.method} ${req.path} ${res.statusCode} ${Date.now() - start}ms`);
-  });
-  next();
-});
-
-app.get('/health', (req, res) => {
-  res.json('This is the health check');
-});
-
-app.post('/api/transaction', validateTransactionBody, async (req, res, next) => {
-  try {
-    const transaction = await transactionService.addTransaction(req.body.amount, req.body.desc);
-    res.status(201).json({ message: 'added transaction successfully', transaction });
-  } catch (err) {
-    next(err);
-  }
-});
-
-app.get('/api/transaction', async (req, res, next) => {
-  try {
-    const result = await transactionService.getAllTransactions();
-    res.status(200).json({ result });
-  } catch (err) {
-    next(err);
-  }
-});
-
-app.delete('/api/transaction', async (req, res, next) => {
-  try {
-    await transactionService.deleteAllTransactions();
-    res.status(200).json({ message: 'delete function execution finished.' });
-  } catch (err) {
-    next(err);
-  }
-});
-
-app.delete('/api/transaction/:id', validateIdParam, async (req, res, next) => {
-  try {
-    await transactionService.deleteTransactionById(req.params.id);
-    res.status(200).json({ message: `transaction with id ${req.params.id} deleted` });
-  } catch (err) {
-    next(err);
-  }
-});
-
-app.get('/api/transaction/:id', validateIdParam, async (req, res, next) => {
-  try {
-    const transaction = await transactionService.findTransactionById(req.params.id);
-    if (!transaction) {
-      return res.status(404).json({ message: 'transaction not found' });
-    }
-    res.status(200).json(transaction);
-  } catch (err) {
-    next(err);
-  }
-});
-
-app.use(errorHandler);
-
-const fs = require('fs');
-const path = require('path');
-
-const server = // start server
-app.listen(port, async () => {
+// ============================================================
+// INTERVIEW NOTE — SCHEMA INITIALIZATION (key talking point):
+//
+// WHY the schema init runs here and not via a migration tool:
+// AWS RDS provisions a completely blank database. Unlike local Docker
+// which can run SQL init scripts via entrypoint hooks, there is no
+// built-in RDS mechanism to apply a schema. A dedicated migration tool
+// (Flyway, Liquibase) is the correct enterprise approach but requires
+// either opening RDS to the internet (security risk) or a dedicated
+// ECS migration task (heavy overhead for a single table).
+// For this project: the backend itself applies the schema on startup.
+//
+// WHY an async IIFE (Immediately Invoked Function Expression):
+// We need to await the database query before calling app.listen().
+// Top-level await is not available in CommonJS modules (require-based).
+// Wrapping everything in (async () => { ... })() is the standard pattern
+// to use async/await at the top level of a CommonJS module.
+//
+// WHY schema init runs BEFORE app.listen() (critical ordering):
+// If app.listen() ran first, Express would immediately start accepting
+// TCP connections. An early request hitting /api/transaction before
+// pool.query(schemaSql) completes would find "relation transactions
+// does not exist" — a race condition. The IIFE guarantees the table
+// exists before the server accepts any traffic.
+//
+// WHY process.exit(1) on failure (fail-fast philosophy):
+// If we only console.error and continue, Express starts serving requests
+// against a DB layer that silently does not work. The ALB health check
+// calls /health which returns 200 (Express is running fine), so the ALB
+// keeps routing real user traffic to a broken container. Calling
+// process.exit(1) crashes the container instantly — ECS marks it
+// unhealthy, the ALB stops routing to it, and the deployment fails
+// visibly rather than silently serving 500 errors.
+//
+// CROSS-QUESTION: "What is CREATE TABLE IF NOT EXISTS doing?"
+// It makes initialization idempotent. First boot: creates the table.
+// Every subsequent boot: the table exists, IF NOT EXISTS skips creation.
+// This means we never accidentally drop and recreate a table with live data.
+// ============================================================
+(async () => {
   try {
     const schemaSql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
     await pool.query(schemaSql);
     console.log('Database schema initialized');
+
+    // app.listen() is called ONLY after schema is confirmed to exist.
+    const server = app.listen(port, () => {
+      console.log(`Backend listening on port ${port}`);
+    });
+
+    // Graceful shutdown: when ECS sends SIGTERM (during a rolling deploy
+    // or scale-in event), we stop accepting new connections, wait for
+    // in-flight requests to complete, then close the DB pool cleanly.
+    // Without this, killing the process mid-request causes connection
+    // resets and potential data corruption on open transactions.
+    // The handlers are registered below, only after `server` exists, so
+    // there is no "server not started yet" case to handle here.
+    function shutdown(signal) {
+      console.log(`${signal} received, shutting down gracefully`);
+      server.close(async () => {
+        await pool.end();
+        process.exit(0);
+      });
+    }
+
+    process.on('SIGTERM', () => shutdown('SIGTERM')); // ECS sends this on task stop
+    process.on('SIGINT',  () => shutdown('SIGINT'));  // Ctrl+C in local dev
+
   } catch (err) {
-    console.error('Failed to initialize database schema:', err);
+    // Fail fast — do not start the server with a broken database layer.
+    console.error('CRITICAL: Failed to initialize database schema:', err);
+    process.exit(1);
   }
-  console.log(`Backend listening on port ${port}`);
-});
-
-function shutdown(signal) {
-  console.log(`${signal} received, shutting down gracefully`);
-  server.close(async () => {
-    await pool.end();
-    process.exit(0);
-  });
-}
-
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
-
-
-
+})();

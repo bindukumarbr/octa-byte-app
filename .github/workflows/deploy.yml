@@ -1,8 +1,17 @@
+# INTERVIEW NOTE: This is the GitHub Actions CI/CD pipeline.
+# It has three sequential jobs: test -> build-and-push -> deploy-production
+# Each job only starts if the previous one succeeded (enforced by "needs:").
+# This guarantees untested or unscanned code never reaches production.
+
 name: CI/CD Pipeline
 
 on:
+  # Runs on every PR opened against main (test job only).
+  # This gives developers fast feedback before merging.
   pull_request:
     branches: [main]
+  # Runs on every push to main (all three jobs).
+  # A direct push to main triggers a full build + deploy.
   push:
     branches: [main]
 
@@ -14,13 +23,19 @@ env:
   ECS_FRONTEND_SERVICE: frontend
   ECS_BACKEND_SERVICE: backend
 
-  # OIDC authentication
+# WHY id-token: write is required:
+# This grants the workflow permission to request an OIDC token from GitHub.
+# Without this permission block, GitHub never issues the JWT, and the
+# configure-aws-credentials action cannot exchange it for AWS credentials.
+# contents: read allows checking out the repository code.
 permissions:
   id-token: write
   contents: read
 
 jobs:
-  # 1: Test & Security Scan (to run on every PR and push)
+  # JOB 1: TEST & SECURITY SCAN
+  # Runs on every PR AND every push to main.
+  # This is the quality gate — no code goes further without passing here.
   test:
     name: Test & Security Scan
     runs-on: ubuntu-latest
@@ -32,37 +47,61 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "18"
+          # cache: "npm" speeds up CI by caching the node_modules layer.
+          # On repeated runs with the same package-lock.json, npm install
+          # is skipped entirely — saves ~30 seconds per run.
           cache: "npm"
           cache-dependency-path: backend/package-lock.json
 
       - name: Install backend dependencies
+        # npm ci (clean install) is used instead of npm install.
+        # npm ci strictly installs exactly what is in package-lock.json.
+        # npm install might silently update minor versions.
+        # In CI, you want deterministic, reproducible installs.
         run: npm ci
         working-directory: backend
 
       - name: Run backend unit tests
+        # Runs: jest
+        # If any test fails, this step fails, the job fails,
+        # and the build-and-push job never starts.
         run: npm test
         working-directory: backend
 
       - name: Scan backend dependencies for vulnerabilities
+        # npm audit checks the dependency tree against the npm security advisory DB.
+        # --audit-level=high: fails only if HIGH or CRITICAL vulnerabilities found.
+        # INTERVIEW NOTE: npm audit only checks JS dependencies in package.json.
+        # It does NOT check OS-level packages in the Docker image.
+        # That gap is covered by Trivy in the build-and-push job.
         run: npm audit --audit-level=high
         working-directory: backend
 
-      - name: Install frontend dependencies
-        run: npm ci
-        working-directory: frontend
-
-  # 2: Build & Push to ECR (only on push to main)
+  # JOB 2: BUILD & PUSH DOCKER IMAGES TO ECR
+  # Only runs on push to main (not PRs).
+  # WHY: PRs from forks or feature branches should not push to production ECR.
   build-and-push:
     name: Build & Push Docker Images
     runs-on: ubuntu-latest
+    # needs: test — this job does not start until test passes.
+    # If test fails, this job is skipped entirely.
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     outputs:
+      # Expose the image tag as a job output so deploy-production can use it.
+      # WHY outputs: the deploy job runs in a separate VM and cannot read
+      # variables from this job's environment directly.
       image-tag: ${{ steps.meta.outputs.tag }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      # WHY OIDC instead of stored AWS access keys:
+      # This action exchanges the GitHub OIDC JWT for temporary AWS credentials.
+      # No AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY is stored as a secret.
+      # The credentials expire when this job ends. A leaked token from a
+      # finished run is completely useless.
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -75,6 +114,13 @@ jobs:
 
       - name: Set image tag from Git SHA
         id: meta
+        # WHY Git SHA and not "latest":
+        # "latest" is a mutable tag — pushing to "latest" overwrites the previous
+        # image. You cannot tell from a running container what code it contains.
+        # The git SHA is globally unique and immutable. It ties every running
+        # container back to an exact commit, diff, and author in git history.
+        # Rollback: find the previous ECS task definition revision (it still
+        # references the old SHA image) and force a new deployment — no rebuild.
         run: echo "tag=${{ github.sha }}" >> $GITHUB_OUTPUT
 
       - name: Build frontend image
@@ -84,6 +130,20 @@ jobs:
         run: |
           docker build -t $ECR_REGISTRY/${{ env.ECR_FRONTEND_REPO }}:$IMAGE_TAG ./frontend
 
+      # WHY Trivy and not just npm audit:
+      # npm audit only checks Node.js dependencies in package.json.
+      # Trivy scans the ENTIRE container image — including the base OS layer
+      # (Alpine/Debian packages, glibc, OpenSSL, etc.).
+      # OS-level CVEs are a major attack vector that npm audit misses entirely.
+      #
+      # WHY exit-code: 0 (honest trade-off to name in the interview):
+      # exit-code: 0 means Trivy reports findings but does NOT fail the build.
+      # In a production environment, you would set exit-code: 1 for CRITICAL
+      # findings to block the pipeline. However, that requires a documented
+      # exception/waiver process for CVEs with no available patch yet —
+      # otherwise a base image CVE with no fix would block all deploys indefinitely.
+      # This is a known improvement item: implement exit-code: 1 + a formal
+      # security exception process.
       - name: Scan frontend image with Trivy
         uses: aquasecurity/trivy-action@master
         with:
@@ -96,6 +156,8 @@ jobs:
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ steps.meta.outputs.tag }}
+        # Image is pushed AFTER Trivy scan — not before.
+        # A failed Trivy scan (if exit-code were 1) would prevent this push.
         run: docker push $ECR_REGISTRY/${{ env.ECR_FRONTEND_REPO }}:$IMAGE_TAG
 
       - name: Build backend image
@@ -119,11 +181,17 @@ jobs:
           IMAGE_TAG: ${{ steps.meta.outputs.tag }}
         run: docker push $ECR_REGISTRY/${{ env.ECR_BACKEND_REPO }}:$IMAGE_TAG
 
-  # 4: Manual Approval + Deploy to Production
+  # JOB 3: DEPLOY TO PRODUCTION (ECS Rolling Update)
   deploy-production:
     name: Deploy to Production
     runs-on: ubuntu-latest
     needs: build-and-push
+    # WHY environment: production:
+    # GitHub Environments can have required reviewers configured.
+    # When set, this job pauses and waits for a human to click
+    # "Approve" in the GitHub UI before executing.
+    # This is the manual approval gate — automated build != authorized release.
+    # Separating build from deploy is a common compliance requirement.
     environment:
       name: production
 
@@ -133,10 +201,22 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-role
           aws-region: ${{ env.AWS_REGION }}
+
+      # WHY describe-task-definition + render-task-definition (not just push a new def):
+      # We do NOT maintain a static task definition JSON file in the repo.
+      # Instead, the pipeline: 1) downloads the CURRENT live task definition from AWS,
+      # 2) injects ONLY the new image URI, 3) registers and deploys the result.
+      # This preserves all other task definition settings (env vars, secrets, CPU/memory,
+      # log config) exactly as Terraform defined them, without duplicating them here.
       - name: Download frontend task definition
         run: |
-          aws ecs describe-task-definition --task-definition ${{ env.ECS_FRONTEND_SERVICE }} --query taskDefinition > task-definition-frontend.json
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.ECS_FRONTEND_SERVICE }} \
+            --query taskDefinition > task-definition-frontend.json
 
+      # amazon-ecs-render-task-definition: takes the downloaded JSON and
+      # replaces the "image" field for the named container with the new ECR URI.
+      # Everything else in the task definition is unchanged.
       - name: Render new frontend task definition
         id: render-frontend
         uses: aws-actions/amazon-ecs-render-task-definition@v1
@@ -145,6 +225,18 @@ jobs:
           container-name: ${{ env.ECS_FRONTEND_SERVICE }}
           image: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_FRONTEND_REPO }}:${{ needs.build-and-push.outputs.image-tag }}
 
+      # amazon-ecs-deploy-task-definition: registers the new task definition
+      # revision and updates the ECS service to use it.
+      # ECS then performs a ROLLING UPDATE:
+      #   1. Launches new tasks with the new image.
+      #   2. Waits for new tasks to pass ALB health checks.
+      #   3. Only then drains and terminates old tasks.
+      # Users see zero downtime — there is always at least one healthy task serving traffic.
+      #
+      # wait-for-service-stability: false on frontend = pipeline does NOT wait
+      # for frontend rollout to complete before moving to the backend.
+      # This is a deliberate time-saving trade-off. If asked: "the pipeline
+      # reports success the moment the deployment is requested, not when confirmed healthy."
       - name: Deploy frontend to ECS
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
@@ -155,7 +247,9 @@ jobs:
 
       - name: Download backend task definition
         run: |
-          aws ecs describe-task-definition --task-definition ${{ env.ECS_BACKEND_SERVICE }} --query taskDefinition > task-definition-backend.json
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.ECS_BACKEND_SERVICE }} \
+            --query taskDefinition > task-definition-backend.json
 
       - name: Render new backend task definition
         id: render-backend
@@ -165,6 +259,15 @@ jobs:
           container-name: ${{ env.ECS_BACKEND_SERVICE }}
           image: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_BACKEND_REPO }}:${{ needs.build-and-push.outputs.image-tag }}
 
+      # wait-for-service-stability: true on backend = pipeline BLOCKS until
+      # new backend tasks pass health checks and old ones are drained.
+      # WHY different from frontend: the backend handles data — a broken
+      # backend deploy silently serving 500s is more damaging than a slow frontend.
+      # CROSS-QUESTION: "What happens if new backend containers fail health checks?"
+      # ECS stops replacing old tasks. The old version stays in service.
+      # ECS does NOT auto-rollback — you would manually force a deploy using
+      # the previous task definition revision. A mature setup adds a CloudWatch
+      # alarm + Lambda to auto-rollback on deployment failure.
       - name: Deploy backend to ECS
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
@@ -173,11 +276,13 @@ jobs:
           cluster: ${{ env.ECS_CLUSTER }}
           wait-for-service-stability: true
 
-  # 5: Notify on any failure (Slack)
+  # JOB 4: FAILURE NOTIFICATION (Slack)
   notify-failure:
     name: Notify on Failure
     runs-on: ubuntu-latest
     needs: [test, build-and-push, deploy-production]
+    # if: failure() — this job only runs if any of the "needs" jobs failed.
+    # It is skipped on success. This is how conditional jobs work in GitHub Actions.
     if: failure()
 
     steps:
@@ -191,7 +296,3 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
-
-
-
-

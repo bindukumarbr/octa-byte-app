@@ -2,21 +2,21 @@
 
 ![Architecture Diagram](./architecture_diagram.png)
 
-The repository includes the declarative Infrastructure as Code (IaC) and Continuous Deployment pipelines designed for hosting the Octa Byte Transaction Service, and the main aim of the project is to demonstrate a production-grade, highly secure, and fully automated DevOps setup on Amazon Web Services (AWS).
+This repository contains the declarative Infrastructure as Code (IaC) and continuous deployment pipeline for hosting the Octa Byte Transaction Service. The main aim of the project is to demonstrate a production-style, secure and automated DevOps setup on Amazon Web Services (AWS).
 
 ---
 
 ## 1. Executive Summary
 
-The project shows the move from local development to a robust, enterprise-grade cloud environment, with a strict emphasis on infrastructure operations, security, and deployment automation.
+The project shows the move from local development to a cloud environment, with an emphasis on infrastructure operations, security and deployment automation.
 
-Key engineering achievements include:
+Key engineering points:
 
-- **100% Infrastructure as Code (IaC):** The use of Terraform will result in a complete removal of manual AWS console provisioning.
-- **Serverless Architecture:** Migrate from virtual machines to container orchestration with no need for maintenance using AWS ECS Fargate.
-- **Zero-Trust Networking:** The use of a strict multi-tier VPC topology featuring isolated database subnets.
-- **Automated management of the secret lifecycle:** the removal of hard-coded secrets through the use of dynamic rotation by AWS Secrets Manager.
-- **Continuous Deployment (CD):** A GitHub Actions pipeline that is completely automated, including OIDC authentication, vulnerability scanning, and deployments performed by rolling updates with zero downtime.
+- **Infrastructure as Code:** All application infrastructure is defined in Terraform, with no manual console provisioning. (The one manual step is the bootstrap identity that Terraform itself runs as.)
+- **Serverless containers:** The workload runs on AWS ECS Fargate, so there are no servers to patch or capacity to manage.
+- **Defence-in-depth networking:** A three-tier VPC with isolated database subnets, and security groups that reference each other instead of IP ranges.
+- **Managed secrets:** No database password exists in code, variables or the Terraform state. AWS generates and manages it in Secrets Manager.
+- **Automated delivery:** A GitHub Actions pipeline with OIDC authentication (no stored AWS keys), dependency and image vulnerability scanning, a manual production approval gate, and rolling ECS deployments.
 
 ---
 
@@ -24,119 +24,148 @@ Key engineering achievements include:
 
 While the focus of this repository is operations, it hosts a decoupled three-tier application:
 
-- **Frontend:** A static single-page application built with React and served using Nginx.
-- **Backend:** A REST API built with Node.js and Express which carries out the business logic and automatically initializes the database schemas when it is started.
+- **Frontend:** A static single-page application built with React and served by Nginx.
+- **Backend:** A REST API built with Node.js and Express. It applies the database schema automatically when it starts.
 - **Database:** A PostgreSQL relational database.
-  – **Routing:** The application makes use of the cloud infrastructure (the Application Load Balancer) for all of its traffic routing and reverse-proxying.
+- **Routing:** The Application Load Balancer does all request routing. There is no reverse proxy inside the application containers.
 
 ---
 
 ## 3. Cloud Infrastructure Setup (AWS)
 
-The infrastructure was designed to ensure high availability, to provide fault tolerance, and to have as little operational overhead as possible.
+The infrastructure is designed for simplicity and low operational overhead, with a few deliberate cost trade-offs listed in section 3.5.
 
 ### 3.1 Serverless Compute (ECS Fargate)
 
 The application workload is hosted on Amazon Elastic Container Service (ECS) using the Fargate launch type.
 
-- **Zero-Ops Compute:** Fargate hides the underlying EC2 instances, thus getting rid of the need for OS patching, AMI management, and cluster capacity scaling.
-- **Task Definitions:** Strict Task Definitions are used to specify the amount of CPU and memory allocated to containers, as well as the environment variables and the routing of CloudWatch logs.
+- **Zero-Ops compute:** Fargate hides the underlying EC2 instances, removing OS patching, AMI management and cluster capacity scaling.
+- **Task definitions:** Each service's CPU, memory, environment variables, secrets and CloudWatch log configuration are declared in Terraform. CPU and memory are variables (`variables.tf`).
 
 ### 3.2 Relational Database Service (RDS)
 
-The data tier uses Amazon RDS for PostgreSQL.
+The data tier uses Amazon RDS for PostgreSQL 15.
 
-– The lifecycle is managed by RDS through automated snapshot backups, automatic application of minor version patches, and the allocation of storage.
-
-- **Burstable Performance:** The service is deployed on db.t3.micro instances so that it can handle transactional workloads featuring variable usage spikes in a cost-effective manner.
+- RDS handles automated backups, minor-version patching and storage management. Storage is encrypted.
+- **Burstable performance:** The instance class is `db.t3.micro`, a cost-effective fit for a small transactional workload.
+- The instance is **single-AZ** (`multi_az` is off) to save cost. See section 3.5.
 
 ### 3.3 Networking Topology (VPC Design)
 
-The environment is based on a custom Virtual Private Cloud (VPC) that covers two Availability Zones (AZs) in order to ensure resilience, and it implements a strict three-tier subnet structure:
+The environment is a custom Virtual Private Cloud (VPC) across two Availability Zones, with a three-tier subnet structure. Subnet CIDRs are derived from the VPC range with Terraform's `cidrsubnet()` rather than typed by hand.
 
-1. **Public Subnets:** These include only the Application Load Balancer (ALB) and the NAT Gateways; they have routes to an Internet Gateway (IGW) to enable public ingress.
-2. **Private Compute Subnets:** These contain the ECS Fargate tasks and are configured so that outbound internet traffic is routed via the NAT Gateway (since this is needed for pulling ECR images), while at the same time blocking all direct public ingress.
-3. **Isolated Database Subnets:** These subnets house the RDS instance and have no routes to the IGW or NAT Gateway, which means that the database is physically isolated from the public internet.
+1. **Public subnets:** Contain only the Application Load Balancer (ALB) and the NAT Gateway, and have a route to the Internet Gateway.
+2. **Private compute subnets:** Contain the ECS Fargate tasks. Outbound traffic (for example pulling ECR images) goes through the NAT Gateway, and there is no direct public ingress.
+3. **Isolated database subnets:** Contain the RDS instance and have no route to the Internet Gateway or the NAT Gateway, so the database is unreachable from the internet.
 
-3.4 Consolidated load balancing
+### 3.4 Consolidated Load Balancing
 
-In order to keep the services decoupled while at the same time reducing costs, a single Application Load Balancer (ALB) is used to handle all the incoming traffic.
+A single Application Load Balancer handles all incoming traffic, which keeps one public hostname and avoids CORS between the frontend and API.
 
-- **Path-Based Routing:** When the ALB Listener receives a request it checks the request path; if the path matches /api/\* then the request is dynamically directed to the Backend ECS Target Group, otherwise it is sent to the Frontend ECS Target Group.
-  – Health checks: The ALB constantly monitors the /health endpoint of the backend and the root path of the frontend, automatically removing traffic from unhealthy containers.
+- **Path-based routing:** Requests matching `/api/*` go to the backend target group. Everything else goes to the frontend target group. The ALB forwards the path unchanged, so the Express routes themselves start with `/api`.
+- **Health checks:** The ALB polls `/health` on the backend and `/` on the frontend, and stops sending traffic to unhealthy tasks.
+
+### 3.5 Known Limitations (deliberate trade-offs)
+
+- **HTTP only:** The ALB listens on port 80. Adding HTTPS means an ACM certificate, a port 443 listener and an HTTP-to-HTTPS redirect.
+- **Single-AZ database, single task per service, single NAT Gateway:** Two AZs are used for the subnets and the ALB, but the database instance, the NAT Gateway and (by default) each ECS service's single task run in one place to save cost. A true multi-AZ setup is `multi_az = true`, a higher `desired_count`, and one NAT Gateway per AZ.
+- **Writable container root filesystem:** See section 4.3.
+- **Report-only image scanning:** See section 6.2.
+- **Unpinned scanner action:** The pipeline uses `trivy-action@master` rather than a pinned version.
 
 ---
 
-## 4. The security and compliance position
+## 4. Security and Compliance Position
 
-Security is woven into the infrastructure using a defense-in-depth methodology:
+Security is built in using a defence-in-depth approach.
 
-### 4.1 Zero-Touch Secrets Management
+### 4.1 Managed Secrets
 
-The inclusion of database credentials that are hardcoded represents a serious security vulnerability.
+Hard-coded database credentials are a serious vulnerability.
 
-- **Creation and Rotation:** Terraform uses the manage_master_user_password feature to tell AWS Secrets Manager to create a high-entropy password for the RDS instance and to automatically manage the ongoing rotation of that password.
-- **Dynamic Injection:** The Backend ECS Task Execution Role is given specific IAM permissions enabling it to read this secret. When the container is starting up, the AWS ECS Agent dynamically injects the decrypted secret into the container as an environment variable.
+- **Creation and rotation:** Terraform sets `manage_master_user_password`, which tells RDS to generate the password and store it in AWS Secrets Manager, where AWS manages it.
+- **Injection at start-up:** The backend's ECS Task Execution Role is granted permission to read that one secret. When the container starts, the ECS agent injects the value as the `DB_PASSWORD` environment variable.
 
-### 4.2 Security Groups with the Least Privilege
+### 4.2 Security Groups (least privilege, chained by reference)
 
-Network traffic is strictly firewalled at the Elastic Network Interface (ENI) level:
+Network traffic is restricted at the Elastic Network Interface (ENI) level, and rules reference other security groups instead of IP ranges:
 
-- The ALB Security Group permits inbound HTTP (on port 80) and HTTPS (on port 443) from 0.0.0.0/0.
-  – For the frontend and backend ECS security groups, all public inbound traffic should be explicitly denied and the only inbound traffic that is accepted is that which comes directly from the ALB security group.
-- **RDS Security Group:** It allows inbound TCP traffic on port 5432 only from the Backend ECS Security Group.
+- **ALB security group:** Allows inbound HTTP (port 80) from `0.0.0.0/0`. (HTTPS is a known gap, see 3.5.)
+- **Frontend and backend ECS security groups (one each):** Each allows inbound traffic only from the ALB security group, and only on its own port (80 for the frontend, 4000 for the backend).
+- **RDS security group:** Allows inbound TCP 5432 only from the **backend** ECS security group, so the frontend tasks have no network path to the database.
 
-### 4.3 Container Immutability and IAM Roles
+### 4.3 Container Hardening and IAM Roles
 
-- **Read-Only Root Filesystems:** The ECS container definitions enforce
-  The readonly root filesystem is set to true since this stops malicious users from installing rootkits or altering the application binaries after deployment. Temporary write access is only given to certain volumes (for example, /var/cache/nginx) by means of ephemeral mpfs mounts.
-- **Role Separation:** The IAM permissions are strictly separated, with the **Task Execution Role** being used by the ECS agent underneath to pull images and retrieve secrets, and the **Task Role** being used by the application runtime itself when interacting with AWS services so that the application code cannot access the deployment secrets.
+- **Root filesystem (known trade-off):** The container definitions set `readonlyRootFilesystem = false`. The ECS module defaults to read-only, but Nginx writes its cache and PID files at start-up and crashed with the default. The hardening path is to restore read-only and add `tmpfs` mounts for only those directories (Fargate supports `tmpfs` through `linuxParameters` since January 2026). This has not been implemented yet.
+- **Role separation:** The **Task Execution Role** is used by the ECS agent to pull images and fetch secrets. The **Task Role** is what the application would use at runtime to call AWS APIs, so application code has no access to the deployment secrets.
+- **Pipeline role:** GitHub Actions assumes a dedicated role whose permissions are limited to pushing to the two ECR repositories, updating the two ECS services, registering task definitions, and passing the ECS task roles.
 
 ---
 
 ## 5. Infrastructure as Code (Terraform)
 
-The entire infrastructure is coded using Terraform, which ensures that the environments are reproducible, auditable, and free from configuration drift.
+The infrastructure is defined in Terraform, which keeps environments reproducible and auditable.
 
-- **Modular Design:** The Terraform codebase is separated into reusable logical modules (vpc, ecs,
-  This DRY (Don't Repeat Yourself) method enables identical infrastructure topographies to be set up for staging or for production by just inserting different .tfvars files.
-  – Remote State Management: The Terraform state file (terraform.tfstate) is kept in an encrypted Amazon S3 bucket with versioning turned on in order to avoid data loss.
-- **State Locking:** State locking is implemented natively via the S3 backend using the modern `use_lockfile = true` feature. This eliminates the legacy requirement for a separate DynamoDB table, reducing infrastructure complexity while still guaranteeing that simultaneous writes do not corrupt the infrastructure state during CI/CD pipeline executions.
+- **Composition:** `terraform/environments/prod` builds the environment from vetted community modules (`terraform-aws-modules`: vpc, alb, ecs, rds, security-group) plus a few direct resources (ECR repositories, the GitHub OIDC provider and role, CloudWatch alarms and dashboards).
+- **Variables:** Environment-specific values (region, names, CIDR, instance class, task sizing, engine version) are inputs in `variables.tf`. A staging environment would be a second directory with its own state key and values; none exists yet.
+- **Remote state:** The state file is kept in an encrypted, versioned S3 bucket with public access blocked.
+- **State locking:** Locking uses the S3 backend's native `use_lockfile = true`, which needs Terraform 1.10 or newer. This removes the legacy DynamoDB lock table.
+- **Pinned versions:** Terraform and provider versions are constrained in `versions.tf`.
 
 ---
 
 ## 6. Continuous Integration and Deployment (CI/CD)
 
-The entire deployment lifecycle is automated using GitHub Actions (.github/workflows/deploy.yml) and thus true Continuous Deployment is achieved.
+The application delivery pipeline is GitHub Actions (`.github/workflows/deploy.yml`). It builds and deploys container images; it does not run Terraform. Infrastructure changes are applied by an operator.
 
 ### 6.1 OIDC Authentication
 
-The system uses OpenID Connect (OIDC) to authenticate with AWS; it is a security anti-pattern to store long-lived AWS Access Keys as GitHub Secrets, since GitHub instead exchanges a signed JWT token with AWS in order to obtain short-lived, temporary deployment credentials, which greatly reduces the scope of damage in the case of a compromised CI system.
+The pipeline authenticates to AWS with OpenID Connect. Storing long-lived AWS access keys as GitHub secrets is an anti-pattern, so GitHub instead issues a short-lived signed token that AWS exchanges for temporary credentials, which limits the damage if the CI system is compromised.
 
 ### 6.2 Pipeline Execution Flow
 
-1. **Testing Phase:** The unit test suite is run against the backend API to make sure there are no code regressions.
-2. **Build & Tagging Phase:** The Docker images for both the frontend and the backend are built. These images are dynamically given tags using the Git commit SHA (for example, git-7b9a2f1) in order to ensure that the deployments are immutable and can be traced back to specific changes in the code.
-3. **Vulnerability Scanning (Trivy):** The pipeline incorporates AquaSecurity Trivy in order to scan the container images that have been built. It stops deliberately if any HIGH or CRITICAL Common Vulnerabilities and Exposures (CVEs) are found in the base operating system or in the dependencies.
-4. **Push Phase:** The secure images are pushed to Amazon Elastic Container Registry (ECR).
-5. **Deployment Phase:** The active ECS Task Definitions are downloaded, the new ECR image URIs are injected, and the new revisions are registered with AWS.
-6. **Zero-Downtime Rollout:** This causes an ECS rolling update, during which ECS sets up the new containers, waits until they have passed the ALB health checks, adds them to the Target Group, and then smoothly removes the active connections from the old containers.
+1. **Test phase:** The backend unit tests and a dependency audit (`npm audit`, high severity) run on every pull request and push.
+2. **Build and tag:** Docker images for the frontend and backend are built and tagged with the Git commit SHA, so each deployment is immutable and traceable to a commit.
+3. **Vulnerability scanning (Trivy):** Trivy scans both images, including OS packages, for HIGH and CRITICAL CVEs. It is currently **report-only** (`exit-code: 0`): findings are shown but do not block the build. Enforcing a failure on CRITICAL findings, with a documented exception process, is the planned next step.
+4. **Push:** Images are pushed to Amazon Elastic Container Registry (ECR).
+5. **Manual approval:** The deploy job targets the GitHub `production` environment, which can require a reviewer to approve.
+6. **Deploy:** The live ECS task definitions are downloaded, the new ECR image URIs are injected, and the new revisions are registered.
+7. **Rolling update:** ECS starts the new tasks, waits for them to pass the ALB health checks, and then drains the old ones.
 
 ---
 
-## 7. Cloud Deployment Instructions
+## 7. Deployment and Local Development
 
 ### Prerequisites
 
-- AWS CLI configured with administrative access
-- Terraform >= 1.5.0
+- AWS CLI configured with credentials that are allowed to create the resources
+- Terraform >= 1.11.0 (required for `use_lockfile`)
 
 ### Provisioning the Infrastructure
 
-Go to the directory of the production infrastructure:
-`cd terraform/environments/prod` 2. Set up Terraform (which downloads the AWS providers and configures the remote S3 backend):
-`terraform init` 3. Have a look at the infrastructure execution plan:
-`terraform plan`
-Provide the infrastructure on AWS:
-`terraform apply`
-When the process has been completed, Terraform will give you the alb_dns_name. This is the URL for your live website.
+1. Go to the production directory: `cd terraform/environments/prod`
+2. Initialise Terraform (downloads providers and configures the remote S3 backend): `terraform init`
+3. Review the execution plan: `terraform plan`
+4. Create the infrastructure: `terraform apply`
+
+When it finishes, Terraform prints `alb_dns_name`, the URL of the live site. The first pipeline run then replaces the placeholder container images with the real ones.
+
+### Running Locally
+
+You need Node.js and a PostgreSQL database. Any Postgres works; for example:
+
+```bash
+# 1. PostgreSQL
+docker run -d --name octa-pg -e POSTGRES_USER=dbadmin -e POSTGRES_PASSWORD=localpw \
+  -e POSTGRES_DB=octadb -p 5432:5432 postgres:15-alpine
+
+# 2. Backend on http://localhost:4000 (creates the table on start-up)
+cd backend && npm ci
+export DB_HOST=localhost DB_USER=dbadmin DB_PASSWORD=localpw DB_NAME=octadb DB_SSL=false
+npm start
+
+# 3. Frontend on http://localhost:5173 (the Vite dev server forwards /api/* to the backend)
+cd frontend && npm ci && npm run dev
+```
+
+`DB_SSL=false` is for local development only. The backend uses SSL by default because AWS RDS requires it. Run the backend tests with `cd backend && npm test`.
